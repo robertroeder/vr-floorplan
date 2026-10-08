@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VR Floorplan</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #b8d4e8; font-family: system-ui, sans-serif; }
+    #status { position: absolute; top: 12px; left: 12px; padding: 6px 10px; background: rgba(0,0,0,.55);
+              color: #fff; border-radius: 6px; font-size: 13px; }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "./vendor/three/build/three.module.min.js",
+        "three/addons/": "./vendor/three/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="status">Loading…</div>
+  <script type="module" src="./main.js"></script>
+</body>
+</html>
