@@ -68,7 +68,7 @@ scene.add(toast.mesh);
 
 function makeToast() {
   const canvas = document.createElement('canvas');
-  const LINE_H = 72, MAX_LINES = 4;
+  const LINE_H = 72, MAX_LINES = 6;
   canvas.width = 1024; canvas.height = LINE_H * MAX_LINES;
   const ctx = canvas.getContext('2d');
   const tex = new THREE.CanvasTexture(canvas);
