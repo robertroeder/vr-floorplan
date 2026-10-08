@@ -7,12 +7,11 @@ import { XRHandModelFactory } from 'three/addons/webxr/XRHandModelFactory.js';
 
 // Model is exported from Blender in meters, glTF Y-up: Blender +Y (north) -> three -Z.
 const SPAWN = new THREE.Vector3(7.97, 0, -5.58);  // kitchen/living threshold, facing north toward the bay
-const LAYOUTS = ['LayoutA', 'LayoutB'];          // alternative furniture layouts (parent nodes in house.glb)
 const MOVE_SPEED = 1.5;                          // m/s
 const SNAP_ANGLE = THREE.MathUtils.degToRad(30);
 const DEADZONE = 0.2;
 const TELEPORT_RANGE = 12;                       // m
-const HINT = 'Right pinch: aim, release to move  ·  Left pinch: switch layout';
+const HINT = 'Right pinch: aim, release to move  ·  Left pinch: next variant';
 
 const status = document.getElementById('status');
 
@@ -48,7 +47,12 @@ const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerH
 rig.add(camera);
 
 const controls = new OrbitControls(camera, renderer.domElement);
-if (new URLSearchParams(location.search).has('spawn')) {
+const camParam = new URLSearchParams(location.search).get('cam');  // ?cam=x,y,z,tx,ty,tz (m, three coords)
+if (camParam) {
+  const [x, y, z, tx, ty, tz] = camParam.split(',').map(Number);
+  camera.position.set(x, y, z);
+  controls.target.set(tx, ty, tz);
+} else if (new URLSearchParams(location.search).has('spawn')) {
   // preview the VR start position at eye height
   camera.position.copy(SPAWN).setY(1.6);
   controls.target.copy(SPAWN).add(new THREE.Vector3(0, 1.4, -2));
@@ -64,12 +68,13 @@ scene.add(toast.mesh);
 
 function makeToast() {
   const canvas = document.createElement('canvas');
-  canvas.width = 1024; canvas.height = 96;
+  const LINE_H = 72, MAX_LINES = 4;
+  canvas.width = 1024; canvas.height = LINE_H * MAX_LINES;
   const ctx = canvas.getContext('2d');
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
   const mesh = new THREE.Mesh(
-    new THREE.PlaneGeometry(0.8, 0.075),
+    new THREE.PlaneGeometry(0.8, 0.8 * canvas.height / canvas.width),
     new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthTest: false }),
   );
   mesh.renderOrder = 10;
@@ -79,15 +84,16 @@ function makeToast() {
   const dir = new THREE.Vector3();
   return {
     mesh,
-    show(text, seconds = 2.5) {
+    show(text, seconds = 2.5) {  // text: string or array of lines (top-aligned)
       if (!renderer.xr.isPresenting) return;
+      const lines = [].concat(text).slice(0, MAX_LINES);
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       ctx.fillStyle = 'rgba(0,0,0,0.65)';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillRect(0, 0, canvas.width, LINE_H * lines.length);
       ctx.fillStyle = '#fff';
       ctx.font = '40px system-ui, sans-serif';
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+      lines.forEach((l, i) => ctx.fillText(l, canvas.width / 2, LINE_H * (i + 0.5)));
       tex.needsUpdate = true;
       // 1.2 m in front of the head, slightly below eye level, facing the user
       const xrCam = renderer.xr.getCamera();
@@ -105,25 +111,46 @@ function makeToast() {
   };
 }
 
-// ---- layout switching (left pinch / X / A in VR, L key or button on desktop) ----
+// ---- variants (left pinch / X / A in VR, L key or button on desktop) ----
+// Every node with a "group" extra is one option of that group (living layout, shower bench, ...).
+// One step counter drives all groups; each shows option (step mod its option count).
 const layoutBtn = document.createElement('button');
 layoutBtn.style.cssText = 'position:absolute;top:12px;right:12px;padding:6px 10px;font:13px system-ui;' +
   'border:0;border-radius:6px;background:rgba(0,0,0,.55);color:#fff;cursor:pointer;display:none';
 document.body.appendChild(layoutBtn);
-let layoutNodes = [];
-let layoutIdx = 0;
+let groups = [];  // [{ name, options: [node, ...] }]
+let period = 1;   // steps until every group is back at its first option
+let step = 0;
 
-function setLayout(i) {
-  if (!layoutNodes.length) return;
-  layoutIdx = (i + layoutNodes.length) % layoutNodes.length;
-  layoutNodes.forEach((n, j) => { n.visible = j === layoutIdx; });
-  const n = layoutNodes[layoutIdx];
-  const text = `Layout ${n.name.replace('Layout', '')}: ${n.userData.label ?? ''}`;
-  layoutBtn.textContent = `${text}  (L to switch)`;
-  toast.show(text);
+const gcd = (a, b) => (b ? gcd(b, a % b) : a);
+
+function initVariants(root) {
+  const byName = new Map();
+  root.traverse((o) => {
+    const g = o.userData.group;
+    if (g === undefined) return;
+    if (!byName.has(g)) byName.set(g, []);
+    byName.get(g).push(o);
+  });
+  groups = [...byName].sort(([a], [b]) => a.localeCompare(b)).map(([name, options]) => ({
+    name, options: options.sort((a, b) => a.userData.index - b.userData.index),
+  }));
+  period = groups.reduce((p, g) => (p * g.options.length) / gcd(p, g.options.length), 1);
 }
-layoutBtn.addEventListener('click', () => setLayout(layoutIdx + 1));
-window.addEventListener('keydown', (e) => { if (e.key === 'l' || e.key === 'L') setLayout(layoutIdx + 1); });
+
+function setStep(n) {
+  if (!groups.length) return;
+  step = ((n % period) + period) % period;
+  const lines = groups.map((g) => {
+    const k = step % g.options.length;
+    g.options.forEach((o, j) => { o.visible = j === k; });
+    return `${g.name}: ${g.options[k].userData.label ?? k}`;
+  });
+  layoutBtn.textContent = `${step + 1}/${period}  ${lines.join('  ·  ')}  (L: next)`;
+  toast.show(lines);
+}
+layoutBtn.addEventListener('click', () => setStep(step + 1));
+window.addEventListener('keydown', (e) => { if (e.key === 'l' || e.key === 'L') setStep(step + 1); });
 
 // ---- model ----
 // Quest 1 is weak: swap PBR/transmission materials for cheap Lambert / basic ones.
@@ -143,11 +170,10 @@ new GLTFLoader().load('./house.glb', (gltf) => {
     teleportSurfaces.push(o);  // walls / furniture block the ray; only floor hits are valid targets
   });
   scene.add(gltf.scene);
-  layoutNodes = LAYOUTS.map((n) => gltf.scene.getObjectByName(n)).filter(Boolean);
-  if (layoutNodes.length) {
+  initVariants(gltf.scene);
+  if (groups.length) {
     layoutBtn.style.display = '';
-    const q = new URLSearchParams(location.search).get('layout');
-    setLayout(Math.max(0, LAYOUTS.indexOf(`Layout${q ?? 'A'}`)));
+    setStep(Number(new URLSearchParams(location.search).get('v')) || 0);  // ?v=<step>
   }
   status.textContent = navigator.xr ? 'Ready: press Enter VR' : 'Ready (no WebXR in this browser)';
 }, undefined, (err) => {
@@ -157,7 +183,7 @@ new GLTFLoader().load('./house.glb', (gltf) => {
 
 // ---- input: controllers and tracked hands ----
 // Pinch (hands) and trigger (controllers) both fire 'select' on the target-ray space.
-// Right select: hold to aim a teleport ray, release to jump. Left select: switch layout.
+// Right select: hold to aim a teleport ray, release to jump. Left select: next variant.
 const controllerModels = new XRControllerModelFactory();
 const handModels = new XRHandModelFactory();
 const pointers = [];
@@ -186,7 +212,7 @@ for (let i = 0; i < 2; i++) {
   ray.addEventListener('disconnected', () => { p.handedness = null; p.aiming = false; line.visible = false; });
   ray.addEventListener('selectstart', () => {
     if (p.handedness === 'right') p.aiming = true;
-    else if (p.handedness === 'left') setLayout(layoutIdx + 1);
+    else if (p.handedness === 'left') setStep(step + 1);
   });
   ray.addEventListener('selectend', () => {
     if (p.aiming && p.target) teleportTo(p.target);
@@ -265,7 +291,7 @@ renderer.xr.addEventListener('sessionend', () => {
   toast.mesh.visible = false;
 });
 
-// ---- controller sticks: left = move (head-relative), right = snap turn; A/X = switch layout ----
+// ---- controller sticks: left = move (head-relative), right = snap turn; A/X = next variant ----
 const clock = new THREE.Clock();
 const fwd = new THREE.Vector3();
 const right = new THREE.Vector3();
@@ -286,7 +312,7 @@ function locomote(dt) {
   for (const src of session.inputSources) {
     if (!src.gamepad || src.hand) continue;
     const pressed = !!src.gamepad.buttons[4]?.pressed;
-    if (pressed && !buttonWasDown[src.handedness]) setLayout(layoutIdx + 1);
+    if (pressed && !buttonWasDown[src.handedness]) setStep(step + 1);
     buttonWasDown[src.handedness] = pressed;
     const { x, y } = stick(src.gamepad);
     if (src.handedness === 'left' && (x || y)) {
