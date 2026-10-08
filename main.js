@@ -5,7 +5,8 @@ import { VRButton } from 'three/addons/webxr/VRButton.js';
 import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
 
 // Model is exported from Blender in meters, glTF Y-up: Blender +Y (north) -> three -Z.
-const SPAWN = new THREE.Vector3(7.9, 0, -7.0);  // living room, facing north toward the bay
+const SPAWN = new THREE.Vector3(7.97, 0, -5.58);  // kitchen/living threshold, facing north toward the bay
+const LAYOUTS = ['LayoutA', 'LayoutB'];          // alternative furniture layouts (parent nodes in house.glb)
 const MOVE_SPEED = 1.5;                          // m/s
 const SNAP_ANGLE = THREE.MathUtils.degToRad(30);
 const DEADZONE = 0.2;
@@ -59,7 +60,58 @@ const controllerModels = new XRControllerModelFactory();
 for (let i = 0; i < 2; i++) {
   const grip = renderer.xr.getControllerGrip(i);
   grip.add(controllerModels.createControllerModel(grip));
+  grip.addEventListener('connected', (e) => {
+    if (e.data.handedness === 'left') grip.add(layoutLabel.mesh);
+  });
   rig.add(grip);
+}
+
+// ---- layout switching (A/X button in VR, L key or button on desktop) ----
+const layoutLabel = makeLabel();
+const layoutBtn = document.createElement('button');
+layoutBtn.style.cssText = 'position:absolute;top:12px;right:12px;padding:6px 10px;font:13px system-ui;' +
+  'border:0;border-radius:6px;background:rgba(0,0,0,.55);color:#fff;cursor:pointer;display:none';
+document.body.appendChild(layoutBtn);
+let layoutNodes = [];
+let layoutIdx = 0;
+
+function setLayout(i) {
+  if (!layoutNodes.length) return;
+  layoutIdx = (i + layoutNodes.length) % layoutNodes.length;
+  layoutNodes.forEach((n, j) => { n.visible = j === layoutIdx; });
+  const n = layoutNodes[layoutIdx];
+  const text = `Layout ${n.name.replace('Layout', '')}: ${n.userData.label ?? ''}`;
+  layoutBtn.textContent = `${text}  (L to switch)`;
+  layoutLabel.set(text);
+}
+layoutBtn.addEventListener('click', () => setLayout(layoutIdx + 1));
+window.addEventListener('keydown', (e) => { if (e.key === 'l' || e.key === 'L') setLayout(layoutIdx + 1); });
+
+function makeLabel() {
+  const canvas = document.createElement('canvas');
+  canvas.width = 512; canvas.height = 64;
+  const ctx = canvas.getContext('2d');
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const mesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.16, 0.02),
+    new THREE.MeshBasicMaterial({ map: tex, transparent: true }),
+  );
+  mesh.position.set(0, 0.05, 0.02);   // just above the left controller
+  mesh.rotation.x = -Math.PI / 4;
+  return {
+    mesh,
+    set(text) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#fff';
+      ctx.font = '28px system-ui, sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+      tex.needsUpdate = true;
+    },
+  };
 }
 
 // ---- model ----
@@ -78,6 +130,12 @@ new GLTFLoader().load('./house.glb', (gltf) => {
     }
   });
   scene.add(gltf.scene);
+  layoutNodes = LAYOUTS.map((n) => gltf.scene.getObjectByName(n)).filter(Boolean);
+  if (layoutNodes.length) {
+    layoutBtn.style.display = '';
+    const q = new URLSearchParams(location.search).get('layout');
+    setLayout(Math.max(0, LAYOUTS.indexOf(`Layout${q ?? 'A'}`)));
+  }
   status.textContent = navigator.xr ? 'Ready: press Enter VR' : 'Ready (no WebXR in this browser)';
 }, undefined, (err) => {
   status.textContent = 'Failed to load model';
@@ -108,6 +166,7 @@ const fwd = new THREE.Vector3();
 const right = new THREE.Vector3();
 const headPos = new THREE.Vector3();
 let snapReady = true;
+const buttonWasDown = {};
 
 function stick(gp) {
   // xr-standard mapping: thumbstick on axes 2/3 (fall back to 0/1)
@@ -122,6 +181,10 @@ function locomote(dt) {
   const xrCam = renderer.xr.getCamera();
   for (const src of session.inputSources) {
     if (!src.gamepad) continue;
+    // A (right) / X (left) = xr-standard button 4: switch layout on press
+    const pressed = !!src.gamepad.buttons[4]?.pressed;
+    if (pressed && !buttonWasDown[src.handedness]) setLayout(layoutIdx + 1);
+    buttonWasDown[src.handedness] = pressed;
     const { x, y } = stick(src.gamepad);
     if (src.handedness === 'left' && (x || y)) {
       xrCam.getWorldDirection(fwd);
