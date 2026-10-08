@@ -8,8 +8,12 @@ WebXR walkthrough of a floor plan model, for viewing in the Quest browser (stand
 
 ## Controls
 
-- **VR**: left stick to move (in the direction you're looking), right stick for 30° snap turns
-- **Desktop**: drag to orbit, scroll to zoom. Add `?spawn` to the URL to preview the VR start position.
+- **VR, hand tracking**: right hand pinch and hold to aim (green ray and ring on the floor), release to
+  teleport there. Left hand pinch switches the furniture layout. Turn by turning your body.
+- **VR, controllers**: left stick to move (in the direction you're looking), right stick for 30° snap
+  turns, right trigger to aim/teleport, A/X (or left trigger) to switch layout.
+- **Desktop**: drag to orbit, scroll to zoom, `L` or the button to switch layout. URL options:
+  `?spawn` previews the VR start position, `?layout=B` starts on layout B.
 
 ## Local preview
 
