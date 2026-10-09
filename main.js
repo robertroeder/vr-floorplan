@@ -41,7 +41,8 @@ document.body.appendChild(vrButton);
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0xb8d4e8);
 
-scene.add(new THREE.HemisphereLight(0xeef4ff, 0x8a7a66, 2.2));
+// neutral ground colour: it lights every downward face (the basement ceiling is white, not brown)
+scene.add(new THREE.HemisphereLight(0xeef4ff, 0xb4b0a8, 2.2));
 const sun = new THREE.DirectionalLight(0xffffff, 1.6);
 sun.position.set(-8, 15, 6);  // from the south-west
 scene.add(sun);
@@ -161,9 +162,28 @@ function setStep(n) {
 layoutBtn.addEventListener('click', () => setStep(step + 1));
 window.addEventListener('keydown', (e) => { if (e.key === 'l' || e.key === 'L') setStep(step + 1); });
 
+// ---- main floor toggle (desktop orbit view): M key or button hides the main floor to show the basement ----
+// The model's "Main floor" node (level extra) holds its walls, floor, fixtures and furniture; the stair,
+// decks and ground aren't in it. Walk mode and VR always show it. ?basement starts with it hidden.
+let mainFloor = null;
+const floorBtn = document.createElement('button');
+floorBtn.style.cssText = 'position:absolute;bottom:12px;right:12px;padding:6px 10px;font:13px system-ui;' +
+  'border:0;border-radius:6px;background:rgba(0,0,0,.55);color:#fff;cursor:pointer;display:none';
+document.body.appendChild(floorBtn);
+
+function showMainFloor(show) {
+  if (!mainFloor) return;
+  mainFloor.visible = show;
+  floorBtn.textContent = `${show ? 'Hide' : 'Show'} main floor${TOUCH ? '' : ' (M)'}`;
+}
+floorBtn.addEventListener('click', (e) => { showMainFloor(!mainFloor.visible); e.currentTarget.blur(); });
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'KeyM' && mainFloor && !walk.active && !renderer.xr.isPresenting) showMainFloor(!mainFloor.visible);
+});
+
 // ---- model ----
 // Quest 1 is weak: swap PBR/transmission materials for cheap Lambert / basic ones.
-const teleportSurfaces = [];  // the ground (at grade, ~1.2 m below the floor) is part of house.glb
+const teleportSurfaces = [];  // the ground (sloped, around the basement) is part of house.glb
 // GitHub Pages sends max-age=600; 'no-cache' revalidates every load (a 304 when unchanged), so a deploy shows at once
 fetch('./house.glb', { cache: 'no-cache' })
   .then((r) => { if (!r.ok) throw new Error(`house.glb: HTTP ${r.status}`); return r.arrayBuffer(); })
@@ -177,6 +197,7 @@ fetch('./house.glb', { cache: 'no-cache' })
 function onModel(gltf) {
   gltf.scene.traverse((o) => {
     if (o.userData.seat !== undefined) seats.push(o);
+    if (o.userData.level === 'main') mainFloor = o;
     if (!o.isMesh) return;
     const src = o.material;
     if (src.transparent || src.name.includes('Glass')) {
@@ -196,6 +217,10 @@ function onModel(gltf) {
     setStep(Number(new URLSearchParams(location.search).get('v')) || 0);  // ?v=<step>
   }
   status.textContent = navigator.xr ? 'Ready: press Enter VR' : 'Ready (no WebXR in this browser)';
+  if (mainFloor) {
+    floorBtn.style.display = '';
+    showMainFloor(!new URLSearchParams(location.search).has('basement'));
+  }
   if (walkParam !== null) startWalk();
 }
 
@@ -428,6 +453,8 @@ function startWalk() {
   walk.orbitCam = { pos: camera.position.clone(), quat: camera.quaternion.clone() };
   controls.enabled = false;
   camera.rotation.order = 'YXZ';
+  showMainFloor(true);  // you'd fall through it
+  floorBtn.style.visibility = 'hidden';
   if (TOUCH) {
     touchUi.style.display = '';
     walkBtn.style.display = 'none';
@@ -473,6 +500,7 @@ function stopWalk() {
   camera.quaternion.copy(walk.orbitCam.quat);
   controls.enabled = true;
   walkBtn.textContent = TOUCH ? 'Walk' : 'Walk (F)';
+  floorBtn.style.visibility = '';
   if (TOUCH) {
     touchUi.style.display = 'none';
     walkBtn.style.display = '';
@@ -590,10 +618,11 @@ const endTouch = (e) => {
 walkCanvas.addEventListener('pointerup', endTouch);
 walkCanvas.addEventListener('pointercancel', endTouch);
 
-const walkParam = new URLSearchParams(location.search).get('walk');  // ?walk=x,z,yawDeg (three coords)
+// ?walk=x,z,yawDeg[,y] (three coords; y = feet height, e.g. -2.64 for the basement)
+const walkParam = new URLSearchParams(location.search).get('walk');
 if (walkParam !== null) {
-  const [x, z, yaw] = walkParam.split(',').map(Number);
-  if (Number.isFinite(x) && Number.isFinite(z)) walk.feet.set(x, 0, z);
+  const [x, z, yaw, y] = walkParam.split(',').map(Number);
+  if (Number.isFinite(x) && Number.isFinite(z)) walk.feet.set(x, y || 0, z);
   walk.yaw = THREE.MathUtils.degToRad(yaw || 0);
 }
 
@@ -680,6 +709,8 @@ renderer.xr.addEventListener('sessionstart', () => {
   rig.position.copy(SPAWN);
   rig.rotation.set(0, 0, 0);
   status.style.display = 'none';
+  showMainFloor(true);
+  floorBtn.style.display = 'none';
   setTimeout(() => toast.show(HINT, 6), 500);  // wait for the first XR pose
 });
 renderer.xr.addEventListener('sessionend', () => {
@@ -689,6 +720,7 @@ renderer.xr.addEventListener('sessionend', () => {
   camera.quaternion.copy(desktopCam.quat);
   controls.enabled = true;
   status.style.display = '';
+  if (mainFloor) floorBtn.style.display = '';
   toast.mesh.visible = false;
 });
 
