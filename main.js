@@ -116,7 +116,8 @@ function makeToast() {
 // One step counter drives all groups; each shows option (step mod its option count).
 const layoutBtn = document.createElement('button');
 layoutBtn.style.cssText = 'position:absolute;top:12px;right:12px;padding:6px 10px;font:13px system-ui;' +
-  'border:0;border-radius:6px;background:rgba(0,0,0,.55);color:#fff;cursor:pointer;display:none';
+  'border:0;border-radius:6px;background:rgba(0,0,0,.55);color:#fff;cursor:pointer;display:none;' +
+  'max-width:min(70vw, 900px);text-align:right';
 document.body.appendChild(layoutBtn);
 let groups = [];  // [{ name, options: [node, ...] }]
 let period = 1;   // steps until every group is back at its first option
