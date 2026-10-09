@@ -177,6 +177,7 @@ new GLTFLoader().load('./house.glb', (gltf) => {
     setStep(Number(new URLSearchParams(location.search).get('v')) || 0);  // ?v=<step>
   }
   status.textContent = navigator.xr ? 'Ready: press Enter VR' : 'Ready (no WebXR in this browser)';
+  if (walkParam !== null) startWalk();
 }, undefined, (err) => {
   status.textContent = 'Failed to load model';
   console.error(err);
@@ -355,9 +356,136 @@ function teleportTo(point, facing = 0) {
   }
 }
 
+// ---- desktop first-person walk: Walk button (or F) locks the mouse; WASD / arrows move, Shift runs, Esc stops ----
+// Feet follow the floor (stairs, decks, yard) and walls / furniture block you; glass doesn't.
+// ?walk=x,z,yawDeg starts walking there without pointer lock (for headless checks; keys still work).
+const EYE_HEIGHT = 1.6;
+const WALK_SPEED = 1.4;          // m/s; Shift = x2.5
+const STEP_UP = 0.3;             // tallest step you walk up (stair risers are 0.22 m)
+const BODY_RADIUS = 0.25;
+const LOOK_SENS = 0.0022;        // rad per pixel of mouse movement
+const BLOCK_HEIGHTS = [STEP_UP + 0.05, 1.0, 1.7];  // above the feet; door headers are at 2.03 m
+
+const walkBtn = document.createElement('button');
+walkBtn.style.cssText = 'position:absolute;bottom:12px;left:12px;padding:6px 10px;font:13px system-ui;' +
+  'border:0;border-radius:6px;background:rgba(0,0,0,.55);color:#fff;cursor:pointer';
+walkBtn.textContent = 'Walk (F)';
+document.body.appendChild(walkBtn);
+
+const walk = { active: false, feet: SPAWN.clone(), yaw: 0, pitch: 0, vy: 0, keys: new Set(), orbitCam: null };
+const walkRay = new THREE.Raycaster();
+const walkDir = new THREE.Vector3();
+const walkOrigin = new THREE.Vector3();
+const DOWN = new THREE.Vector3(0, -1, 0);
+
+function startWalk() {
+  if (walk.active || renderer.xr.isPresenting) return;
+  walk.active = true;
+  walk.orbitCam = { pos: camera.position.clone(), quat: camera.quaternion.clone() };
+  controls.enabled = false;
+  camera.rotation.order = 'YXZ';
+  walkBtn.textContent = 'WASD / arrows: move  ·  mouse: look  ·  Shift: run  ·  L: next variant  ·  Esc: stop';
+}
+
+function stopWalk() {
+  if (!walk.active) return;
+  walk.active = false;
+  walk.keys.clear();
+  camera.rotation.order = 'XYZ';
+  camera.position.copy(walk.orbitCam.pos);
+  camera.quaternion.copy(walk.orbitCam.quat);
+  controls.enabled = true;
+  walkBtn.textContent = 'Walk (F)';
+}
+
+const requestWalk = () => renderer.domElement.requestPointerLock();
+walkBtn.addEventListener('click', (e) => { if (!walk.active) requestWalk(); e.currentTarget.blur(); });
+document.addEventListener('pointerlockchange', () => {
+  if (document.pointerLockElement === renderer.domElement) startWalk(); else stopWalk();
+});
+document.addEventListener('mousemove', (e) => {
+  if (!walk.active || document.pointerLockElement !== renderer.domElement) return;
+  walk.yaw -= e.movementX * LOOK_SENS;
+  walk.pitch = THREE.MathUtils.clamp(walk.pitch - e.movementY * LOOK_SENS, -1.45, 1.45);
+});
+window.addEventListener('keydown', (e) => {
+  if (!walk.active) {
+    if (e.code === 'KeyF') requestWalk();
+    return;
+  }
+  if (e.code === 'Escape') { document.exitPointerLock(); stopWalk(); return; }  // ?walk has no lock to release
+  walk.keys.add(e.code);
+  if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault();
+});
+window.addEventListener('keyup', (e) => walk.keys.delete(e.code));
+window.addEventListener('blur', () => walk.keys.clear());
+
+const walkParam = new URLSearchParams(location.search).get('walk');  // ?walk=x,z,yawDeg (three coords)
+if (walkParam !== null) {
+  const [x, z, yaw] = walkParam.split(',').map(Number);
+  if (Number.isFinite(x) && Number.isFinite(z)) walk.feet.set(x, 0, z);
+  walk.yaw = THREE.MathUtils.degToRad(yaw || 0);
+}
+
+function firstVisibleHit(origin, dir, far) {
+  walkRay.set(origin, dir);
+  walkRay.far = far;
+  return walkRay.intersectObjects(teleportSurfaces, false).find((h) => visibleInScene(h.object));
+}
+
+// Height of the walkable surface under (x, z), searching down from a step above the feet; null if none.
+function floorAt(x, z) {
+  const hit = firstVisibleHit(walkOrigin.set(x, walk.feet.y + STEP_UP, z), DOWN, 50);
+  if (!hit) return null;
+  tmpNormal.copy(hit.face.normal).transformDirection(hit.object.matrixWorld);
+  return tmpNormal.y > 0.7 ? hit.point.y : null;
+}
+
+function blocked(dx, dz) {
+  const dist = Math.hypot(dx, dz);
+  walkDir.set(dx / dist, 0, dz / dist);
+  return BLOCK_HEIGHTS.some((h) => firstVisibleHit(
+    walkOrigin.set(walk.feet.x, walk.feet.y + h, walk.feet.z), walkDir, dist + BODY_RADIUS));
+}
+
+function tryMove(dx, dz) {
+  if (Math.abs(dx) + Math.abs(dz) < 1e-6 || blocked(dx, dz)) return;
+  if (floorAt(walk.feet.x + dx, walk.feet.z + dz) === null) return;  // off the edge of the world
+  walk.feet.x += dx;
+  walk.feet.z += dz;
+}
+
+function updateWalk(dt) {
+  const k = walk.keys;
+  const f = (k.has('KeyW') || k.has('ArrowUp')) - (k.has('KeyS') || k.has('ArrowDown'));
+  const s = (k.has('KeyD') || k.has('ArrowRight')) - (k.has('KeyA') || k.has('ArrowLeft'));
+  if (f || s) {
+    // yaw 0 faces -Z (north); + yaw turns left
+    const step = WALK_SPEED * (k.has('ShiftLeft') || k.has('ShiftRight') ? 2.5 : 1) * dt;
+    const sin = Math.sin(walk.yaw), cos = Math.cos(walk.yaw);
+    const mx = -sin * f + cos * s, mz = -cos * f - sin * s;
+    const n = Math.hypot(mx, mz);
+    tryMove(mx / n * step, 0);  // one axis at a time, so you slide along walls
+    tryMove(0, mz / n * step);
+  }
+  const floor = floorAt(walk.feet.x, walk.feet.z);
+  if (floor !== null) {
+    if (walk.feet.y - floor <= STEP_UP) {  // stand on it (up or down a step)
+      walk.feet.y = floor;
+      walk.vy = 0;
+    } else {                               // fall (off the deck edge, down the stairwell)
+      walk.vy -= 9.8 * dt;
+      walk.feet.y = Math.max(floor, walk.feet.y + walk.vy * dt);
+    }
+  }
+  camera.position.set(walk.feet.x, walk.feet.y + EYE_HEIGHT, walk.feet.z);
+  camera.rotation.set(walk.pitch, walk.yaw, 0);
+}
+
 // ---- entering / leaving VR ----
 let desktopCam = null;
 renderer.xr.addEventListener('sessionstart', () => {
+  if (walk.active) { stopWalk(); document.exitPointerLock(); }
   desktopCam = { pos: camera.position.clone(), quat: camera.quaternion.clone() };
   controls.enabled = false;
   rig.position.copy(SPAWN);
@@ -423,7 +551,8 @@ renderer.setAnimationLoop(() => {
     if (p.swiping) updateSwipe(p);
   }
   toast.update();
-  if (!renderer.xr.isPresenting) controls.update();
+  if (walk.active) updateWalk(dt);
+  else if (!renderer.xr.isPresenting) controls.update();
   renderer.render(scene, camera);
 });
 
