@@ -364,7 +364,10 @@ const WALK_SPEED = 1.4;          // m/s; Shift = x2.5
 const STEP_UP = 0.3;             // tallest step you walk up (stair risers are 0.22 m)
 const BODY_RADIUS = 0.25;
 const LOOK_SENS = 0.0022;        // rad per pixel of mouse movement
-const BLOCK_HEIGHTS = [STEP_UP + 0.05, 1.0, 1.7];  // above the feet; door headers are at 2.03 m
+// [height above the feet, reach past the move] for the blocking rays. Feet and head reach less than the body
+// radius: on a stair (0.23 m treads) a long low ray hits the riser two steps up, and a long head ray going
+// down hits the floor edge a tread early. Door headers are at 2.03 m.
+const BLOCKERS = [[STEP_UP + 0.05, 0.12], [1.0, BODY_RADIUS], [1.7, 0.12]];
 
 const walkBtn = document.createElement('button');
 walkBtn.style.cssText = 'position:absolute;bottom:12px;left:12px;padding:6px 10px;font:13px system-ui;' +
@@ -444,8 +447,8 @@ function floorAt(x, z) {
 function blocked(dx, dz) {
   const dist = Math.hypot(dx, dz);
   walkDir.set(dx / dist, 0, dz / dist);
-  return BLOCK_HEIGHTS.some((h) => firstVisibleHit(
-    walkOrigin.set(walk.feet.x, walk.feet.y + h, walk.feet.z), walkDir, dist + BODY_RADIUS));
+  return BLOCKERS.some(([h, reach]) => firstVisibleHit(
+    walkOrigin.set(walk.feet.x, walk.feet.y + h, walk.feet.z), walkDir, dist + reach));
 }
 
 function tryMove(dx, dz) {
