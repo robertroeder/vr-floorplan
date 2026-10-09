@@ -20,6 +20,7 @@
 </head>
 <body>
   <div id="status">Loading…</div>
-  <script type="module" src="./main.js"></script>
+  <!-- cache-bust main.js (Pages sends max-age=600) so a deploy shows on the next reload -->
+  <script type="module">import(`./main.js?t=${Date.now()}`);</script>
 </body>
 </html>

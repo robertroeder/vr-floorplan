@@ -156,7 +156,17 @@ window.addEventListener('keydown', (e) => { if (e.key === 'l' || e.key === 'L') 
 // ---- model ----
 // Quest 1 is weak: swap PBR/transmission materials for cheap Lambert / basic ones.
 const teleportSurfaces = [];  // the ground (at grade, ~1.2 m below the floor) is part of house.glb
-new GLTFLoader().load('./house.glb', (gltf) => {
+// GitHub Pages sends max-age=600; 'no-cache' revalidates every load (a 304 when unchanged), so a deploy shows at once
+fetch('./house.glb', { cache: 'no-cache' })
+  .then((r) => { if (!r.ok) throw new Error(`house.glb: HTTP ${r.status}`); return r.arrayBuffer(); })
+  .then((buf) => new GLTFLoader().parseAsync(buf, './'))
+  .then(onModel)
+  .catch((err) => {
+    status.textContent = 'Failed to load model';
+    console.error(err);
+  });
+
+function onModel(gltf) {
   gltf.scene.traverse((o) => {
     if (o.userData.seat !== undefined) seats.push(o);
     if (!o.isMesh) return;
@@ -179,10 +189,7 @@ new GLTFLoader().load('./house.glb', (gltf) => {
   }
   status.textContent = navigator.xr ? 'Ready: press Enter VR' : 'Ready (no WebXR in this browser)';
   if (walkParam !== null) startWalk();
-}, undefined, (err) => {
-  status.textContent = 'Failed to load model';
-  console.error(err);
-});
+}
 
 // ---- input: controllers and tracked hands ----
 // Pinch (hands) and trigger (controllers) both fire 'select' on the target-ray space.
