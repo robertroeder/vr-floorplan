@@ -11,7 +11,13 @@ const MOVE_SPEED = 1.5;                          // m/s
 const SNAP_ANGLE = THREE.MathUtils.degToRad(30);
 const DEADZONE = 0.2;
 const TELEPORT_RANGE = 12;                       // m
-const HINT = 'Right pinch: aim, release to move  ·  Left pinch: next variant';
+const SWIPE_STEP = 0.10;                         // m of sideways left-pinch drag per snap turn
+const TWIST_GAIN = 2;                            // landing-facing turn per unit of wrist twist while aiming
+const UP = THREE.Object3D.DEFAULT_UP;
+const HINT = [
+  'Right pinch: aim, twist wrist to face, release to move',
+  'Left pinch: next variant  ·  pinch + swipe sideways: turn',
+];
 
 const status = document.getElementById('status');
 
@@ -198,21 +204,77 @@ for (let i = 0; i < 2; i++) {
   ray.add(line);
   rig.add(ray);
 
-  const p = { ray, line, handedness: null, aiming: false, target: null };
+  // left select: a quick pinch (or trigger) = next variant; pinch + sideways drag = snap turns instead
+  const p = { ray, line, hand, handedness: null, aiming: false, target: null, facing: 0,
+              twistUp0: null, swiping: false, swiped: false, anchor: new THREE.Vector3() };
   pointers.push(p);
   ray.addEventListener('connected', (e) => { p.handedness = e.data.handedness; });
-  ray.addEventListener('disconnected', () => { p.handedness = null; p.aiming = false; line.visible = false; });
+  ray.addEventListener('disconnected', () => {
+    p.handedness = null; p.aiming = false; p.swiping = false; line.visible = false;
+  });
   ray.addEventListener('selectstart', () => {
-    if (p.handedness === 'right') p.aiming = true;
-    else if (p.handedness === 'left') setStep(step + 1);
+    if (p.handedness === 'right') {
+      p.aiming = true;
+      p.facing = 0;
+      p.twistUp0 = twistFrame(p).up.clone();
+    } else if (p.handedness === 'left') {
+      p.swiping = true;
+      p.swiped = false;
+      p.anchor.copy(ray.position);  // rig-local, so turning the rig doesn't move it
+    }
   });
   ray.addEventListener('selectend', () => {
-    if (p.aiming && p.target) teleportTo(p.target);
+    if (p.aiming && p.target) teleportTo(p.target, p.facing);
+    if (p.swiping && !p.swiped) setStep(step + 1);
     p.aiming = false;
+    p.swiping = false;
     p.target = null;
     line.visible = false;
     marker.visible = false;
   });
+}
+
+// Wrist frame for the teleport twist: the hand's wrist joint when hand tracking (its -Z runs along the
+// hand, +Y out of the back of the hand), else the controller's target ray.
+const twistFwd = new THREE.Vector3();
+const twistUp = new THREE.Vector3();
+function twistFrame(p) {
+  const wrist = p.hand.joints?.wrist;
+  const src = wrist && wrist.visible ? wrist : p.ray;
+  src.getWorldQuaternion(tmpQuat);
+  return { fwd: twistFwd.set(0, 0, -1).applyQuaternion(tmpQuat), up: twistUp.set(0, 1, 0).applyQuaternion(tmpQuat) };
+}
+
+// Signed wrist twist (radians, + = counter-clockwise as the user sees it) since the pinch started.
+const twistA = new THREE.Vector3();
+const twistB = new THREE.Vector3();
+function wristTwist(p) {
+  const { fwd, up } = twistFrame(p);
+  twistA.copy(p.twistUp0).projectOnPlane(fwd);
+  twistB.copy(up).projectOnPlane(fwd);
+  if (twistA.lengthSq() < 1e-6 || twistB.lengthSq() < 1e-6) return 0;
+  // right-hand rule about fwd (pointing away from the user) is clockwise as seen from behind
+  return -Math.atan2(twistA.clone().cross(twistB).dot(fwd), twistA.dot(twistB));
+}
+
+function updateSwipe(p) {
+  // sideways hand travel since the anchor, along the head's right vector (world)
+  const xrCam = renderer.xr.getCamera();
+  xrCam.getWorldDirection(fwd);
+  fwd.y = 0; fwd.normalize();
+  right.crossVectors(fwd, UP).normalize();
+  const dx = tmpDir.copy(p.ray.position).sub(p.anchor).applyQuaternion(rig.quaternion).dot(right);
+  if (Math.abs(dx) < SWIPE_STEP) return;
+  snapTurn(-Math.sign(dx) * SNAP_ANGLE);  // swipe right = turn right
+  p.swiped = true;
+  p.anchor.copy(p.ray.position);
+}
+
+function snapTurn(angle) {
+  // rotate the rig around the head so the user turns in place (+angle = turn left)
+  renderer.xr.getCamera().getWorldPosition(headPos);
+  rig.position.sub(headPos).applyAxisAngle(UP, angle).add(headPos);
+  rig.rotation.y += angle;
 }
 
 const marker = new THREE.Mesh(
@@ -222,6 +284,16 @@ const marker = new THREE.Mesh(
 marker.renderOrder = 9;
 marker.visible = false;
 scene.add(marker);
+// arrow on the ring: which way you'll face after the teleport (marker.rotation.y = landing yaw)
+const markerArrow = new THREE.Mesh(
+  new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(0, 0, -0.48), new THREE.Vector3(-0.11, 0, -0.29), new THREE.Vector3(0.11, 0, -0.29),
+  ]),
+  marker.material,
+);
+markerArrow.material.side = THREE.DoubleSide;
+markerArrow.renderOrder = 9;
+marker.add(markerArrow);
 
 const raycaster = new THREE.Raycaster();
 raycaster.far = TELEPORT_RANGE;
@@ -252,16 +324,28 @@ function updateAim(p) {
   p.line.visible = true;
   p.target = valid ? hit.point.clone() : null;
   marker.visible = valid;
-  if (valid) marker.position.copy(hit.point).setY(hit.point.y + 0.01);
+  if (!valid) return;
+  marker.position.copy(hit.point).setY(hit.point.y + 0.01);
+  // landing facing: current head yaw plus the wrist twist, in snap-angle steps
+  const twist = TWIST_GAIN * wristTwist(p);
+  p.facing = THREE.MathUtils.clamp(Math.round(twist / SNAP_ANGLE) * SNAP_ANGLE, -Math.PI, Math.PI);
+  renderer.xr.getCamera().getWorldDirection(fwd);
+  marker.rotation.y = Math.atan2(-fwd.x, -fwd.z) + p.facing;
 }
 
 const headPos = new THREE.Vector3();
-function teleportTo(point) {
-  // move the rig so the user's head ends up above the target point, standing on it (stairs, yard)
+function teleportTo(point, facing = 0) {
+  // move the rig so the user's head ends up above the target point, standing on it (stairs, yard),
+  // then turn it about that point by `facing` (+ = left)
   renderer.xr.getCamera().getWorldPosition(headPos);
   rig.position.x += point.x - headPos.x;
   rig.position.z += point.z - headPos.z;
   rig.position.y = point.y;
+  if (facing) {
+    tmpPos.set(point.x, rig.position.y, point.z);
+    rig.position.sub(tmpPos).applyAxisAngle(UP, facing).add(tmpPos);
+    rig.rotation.y += facing;
+  }
 }
 
 // ---- entering / leaving VR ----
@@ -311,16 +395,12 @@ function locomote(dt) {
     if (src.handedness === 'left' && (x || y)) {
       xrCam.getWorldDirection(fwd);
       fwd.y = 0; fwd.normalize();
-      right.crossVectors(fwd, THREE.Object3D.DEFAULT_UP).normalize();
+      right.crossVectors(fwd, UP).normalize();
       rig.position.addScaledVector(fwd, -y * MOVE_SPEED * dt);
       rig.position.addScaledVector(right, x * MOVE_SPEED * dt);
     } else if (src.handedness === 'right') {
       if (snapReady && Math.abs(x) > 0.7) {
-        // rotate the rig around the head so the user turns in place
-        const angle = -Math.sign(x) * SNAP_ANGLE;
-        xrCam.getWorldPosition(headPos);
-        rig.position.sub(headPos).applyAxisAngle(THREE.Object3D.DEFAULT_UP, angle).add(headPos);
-        rig.rotation.y += angle;
+        snapTurn(-Math.sign(x) * SNAP_ANGLE);
         snapReady = false;
       } else if (Math.abs(x) < 0.3) {
         snapReady = true;
@@ -332,7 +412,10 @@ function locomote(dt) {
 renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.1);
   locomote(dt);
-  for (const p of pointers) if (p.aiming) updateAim(p);
+  for (const p of pointers) {
+    if (p.aiming) updateAim(p);
+    if (p.swiping) updateSwipe(p);
+  }
   toast.update();
   if (!renderer.xr.isPresenting) controls.update();
   renderer.render(scene, camera);
