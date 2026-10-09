@@ -158,6 +158,7 @@ window.addEventListener('keydown', (e) => { if (e.key === 'l' || e.key === 'L') 
 const teleportSurfaces = [];  // the ground (at grade, ~1.2 m below the floor) is part of house.glb
 new GLTFLoader().load('./house.glb', (gltf) => {
   gltf.scene.traverse((o) => {
+    if (o.userData.seat !== undefined) seats.push(o);
     if (!o.isMesh) return;
     const src = o.material;
     if (src.transparent || src.name.includes('Glass')) {
@@ -368,6 +369,9 @@ const LOOK_SENS = 0.0022;        // rad per pixel of mouse movement
 // radius: on a stair (0.23 m treads) a long low ray hits the riser two steps up, and a long head ray going
 // down hits the floor edge a tread early. Door headers are at 2.03 m.
 const BLOCKERS = [[STEP_UP + 0.05, 0.12], [1.0, BODY_RADIUS], [1.7, 0.12]];
+const SIT_RANGE = 1.5;           // m from your feet to a seat for C to sit you there
+const WALK_MOVE_KEYS = ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
+const WALK_HINT = 'WASD / arrows: move  ·  mouse: look  ·  Shift: run  ·  C: sit  ·  L: next variant  ·  Esc: stop';
 
 const walkBtn = document.createElement('button');
 walkBtn.style.cssText = 'position:absolute;bottom:12px;left:12px;padding:6px 10px;font:13px system-ui;' +
@@ -375,11 +379,23 @@ walkBtn.style.cssText = 'position:absolute;bottom:12px;left:12px;padding:6px 10p
 walkBtn.textContent = 'Walk (F)';
 document.body.appendChild(walkBtn);
 
-const walk = { active: false, feet: SPAWN.clone(), yaw: 0, pitch: 0, vy: 0, keys: new Set(), orbitCam: null };
+// seated: the seat node we're on (eye position + "yaw" extra, from layout_living.py); standFeet: where to stand back up
+const walk = { active: false, feet: SPAWN.clone(), yaw: 0, pitch: 0, vy: 0, keys: new Set(), orbitCam: null,
+               seated: null, standFeet: new THREE.Vector3() };
+const seats = [];  // nodes with a "seat" extra (sofa, chaise, dining chairs), filled when the model loads
 const walkRay = new THREE.Raycaster();
 const walkDir = new THREE.Vector3();
 const walkOrigin = new THREE.Vector3();
 const DOWN = new THREE.Vector3(0, -1, 0);
+let hintTimer = 0;
+
+function walkHint(text = null, seconds = 0) {
+  clearTimeout(hintTimer);
+  walkBtn.textContent = text ?? (walk.seated
+    ? `Sitting: ${walk.seated.userData.seat}  ·  mouse: look  ·  C or WASD: stand up  ·  Esc: stop`
+    : WALK_HINT);
+  if (seconds) hintTimer = setTimeout(() => walk.active && walkHint(), seconds * 1000);
+}
 
 function startWalk() {
   if (walk.active || renderer.xr.isPresenting) return;
@@ -387,13 +403,39 @@ function startWalk() {
   walk.orbitCam = { pos: camera.position.clone(), quat: camera.quaternion.clone() };
   controls.enabled = false;
   camera.rotation.order = 'YXZ';
-  walkBtn.textContent = 'WASD / arrows: move  ·  mouse: look  ·  Shift: run  ·  L: next variant  ·  Esc: stop';
+  walkHint();
+}
+
+function sit() {
+  // nearest visible seat (current living layout) on this floor level
+  let best = null, bestD = SIT_RANGE;
+  for (const s of seats) {
+    if (!visibleInScene(s)) continue;
+    s.getWorldPosition(tmpPos);
+    const d = Math.hypot(tmpPos.x - walk.feet.x, tmpPos.z - walk.feet.z);
+    if (d < bestD && Math.abs(tmpPos.y - walk.feet.y) < 1.6) { best = s; bestD = d; }
+  }
+  if (!best) { walkHint(`No seat within ${SIT_RANGE} m`, 1.5); return; }
+  walk.standFeet.copy(walk.feet);
+  walk.seated = best;
+  walk.yaw = best.userData.yaw;
+  walk.pitch = 0;
+  walkHint();
+}
+
+function standUp() {
+  if (!walk.seated) return;
+  walk.feet.copy(walk.standFeet);  // where you were, so you're never left inside the furniture
+  walk.seated = null;
+  walkHint();
 }
 
 function stopWalk() {
   if (!walk.active) return;
+  standUp();
   walk.active = false;
   walk.keys.clear();
+  clearTimeout(hintTimer);
   camera.rotation.order = 'XYZ';
   camera.position.copy(walk.orbitCam.pos);
   camera.quaternion.copy(walk.orbitCam.quat);
@@ -417,6 +459,7 @@ window.addEventListener('keydown', (e) => {
     return;
   }
   if (e.code === 'Escape') { document.exitPointerLock(); stopWalk(); return; }  // ?walk has no lock to release
+  if (e.code === 'KeyC') { if (!e.repeat) (walk.seated ? standUp : sit)(); return; }
   walk.keys.add(e.code);
   if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault();
 });
@@ -460,6 +503,16 @@ function tryMove(dx, dz) {
 
 function updateWalk(dt) {
   const k = walk.keys;
+  if (walk.seated) {
+    // a move key, or the layout changing (L) and hiding the seat, stands you up
+    if (WALK_MOVE_KEYS.some((c) => k.has(c)) || !visibleInScene(walk.seated)) {
+      standUp();
+    } else {
+      walk.seated.getWorldPosition(camera.position);
+      camera.rotation.set(walk.pitch, walk.yaw, 0);
+      return;
+    }
+  }
   const f = (k.has('KeyW') || k.has('ArrowUp')) - (k.has('KeyS') || k.has('ArrowDown'));
   const s = (k.has('KeyD') || k.has('ArrowRight')) - (k.has('KeyA') || k.has('ArrowLeft'));
   if (f || s) {
