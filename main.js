@@ -32,14 +32,6 @@ const sun = new THREE.DirectionalLight(0xffffff, 1.6);
 sun.position.set(-8, 15, 6);  // from the south-west
 scene.add(sun);
 
-const ground = new THREE.Mesh(
-  new THREE.PlaneGeometry(200, 200),
-  new THREE.MeshLambertMaterial({ color: 0x7d9a6a }),
-);
-ground.rotation.x = -Math.PI / 2;
-ground.position.y = -0.03;  // just under the floor slab
-scene.add(ground);
-
 // ---- camera rig: move the rig to locomote, the headset moves the camera inside it ----
 const rig = new THREE.Group();
 scene.add(rig);
@@ -154,7 +146,7 @@ window.addEventListener('keydown', (e) => { if (e.key === 'l' || e.key === 'L') 
 
 // ---- model ----
 // Quest 1 is weak: swap PBR/transmission materials for cheap Lambert / basic ones.
-const teleportSurfaces = [ground];
+const teleportSurfaces = [];  // the ground (at grade, ~1.2 m below the floor) is part of house.glb
 new GLTFLoader().load('./house.glb', (gltf) => {
   gltf.scene.traverse((o) => {
     if (!o.isMesh) return;
@@ -252,7 +244,7 @@ function updateAim(p) {
   let valid = false;
   if (hit) {
     tmpNormal.copy(hit.face.normal).transformDirection(hit.object.matrixWorld);
-    valid = tmpNormal.y > 0.7 && hit.point.y < 0.15;  // floor or ground, not furniture tops
+    valid = tmpNormal.y > 0.7 && hit.point.y < 0.15;  // floors, decks, stairs, ground; not furniture tops
   }
   const len = hit ? hit.distance : TELEPORT_RANGE;
   p.line.scale.z = len;
@@ -260,15 +252,16 @@ function updateAim(p) {
   p.line.visible = true;
   p.target = valid ? hit.point.clone() : null;
   marker.visible = valid;
-  if (valid) marker.position.copy(hit.point).setY(Math.max(hit.point.y, 0) + 0.01);
+  if (valid) marker.position.copy(hit.point).setY(hit.point.y + 0.01);
 }
 
 const headPos = new THREE.Vector3();
 function teleportTo(point) {
-  // move the rig so the user's head ends up above the target point
+  // move the rig so the user's head ends up above the target point, standing on it (stairs, yard)
   renderer.xr.getCamera().getWorldPosition(headPos);
   rig.position.x += point.x - headPos.x;
   rig.position.z += point.z - headPos.z;
+  rig.position.y = point.y;
 }
 
 // ---- entering / leaving VR ----
