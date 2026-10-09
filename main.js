@@ -23,6 +23,8 @@ const HINT = [
 ];
 
 const status = document.getElementById('status');
+// phones / tablets: walk mode uses an on-screen thumbstick and drag-to-look (?touch forces it, for testing)
+const TOUCH = matchMedia('(pointer: coarse)').matches || new URLSearchParams(location.search).has('touch');
 
 // ---- renderer / scene ----
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -31,7 +33,8 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.xr.enabled = true;
 renderer.xr.setFoveation(1);
 document.body.appendChild(renderer.domElement);
-document.body.appendChild(VRButton.createButton(renderer, { optionalFeatures: ['hand-tracking'] }));
+const vrButton = VRButton.createButton(renderer, { optionalFeatures: ['hand-tracking'] });
+document.body.appendChild(vrButton);
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0xb8d4e8);
@@ -119,6 +122,9 @@ layoutBtn.style.cssText = 'position:absolute;top:12px;right:12px;padding:6px 10p
   'border:0;border-radius:6px;background:rgba(0,0,0,.55);color:#fff;cursor:pointer;display:none;' +
   'max-width:min(70vw, 900px);text-align:right';
 document.body.appendChild(layoutBtn);
+// phones in portrait: below the status line instead of overlapping it
+const placeLayoutBtn = () => { layoutBtn.style.top = window.innerWidth < 600 ? '48px' : '12px'; };
+placeLayoutBtn();
 let groups = [];  // [{ name, options: [node, ...] }]
 let period = 1;   // steps until every group is back at its first option
 let step = 0;
@@ -147,7 +153,7 @@ function setStep(n) {
     g.options.forEach((o, j) => { o.visible = j === k; });
     return `${g.name}: ${g.options[k].userData.label ?? k}`;
   });
-  layoutBtn.textContent = `${step + 1}/${period}  ${lines.join('  ·  ')}  (L: next)`;
+  layoutBtn.textContent = `${step + 1}/${period}  ${lines.join('  ·  ')}  (${TOUCH ? 'tap' : 'L'}: next)`;
   toast.show(lines);
 }
 layoutBtn.addEventListener('click', () => setStep(step + 1));
@@ -379,6 +385,10 @@ const BLOCKERS = [[STEP_UP + 0.05, 0.12], [1.0, BODY_RADIUS], [1.7, 0.12]];
 const SIT_RANGE = 1.5;           // m from your feet to a seat for C to sit you there
 const WALK_MOVE_KEYS = ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
 const WALK_HINT = 'WASD / arrows: move  ·  mouse: look  ·  Shift: run  ·  C: sit  ·  L: next variant  ·  Esc: stop';
+const TOUCH_HINT = 'Left thumb: move (push farther to run)  ·  drag: look';
+const STICK_R = 60;              // px of thumb travel for full speed (touch)
+const STICK_DEADZONE = 0.15;
+const TOUCH_LOOK_SENS = 0.005;   // rad per pixel of drag
 
 const walkBtn = document.createElement('button');
 walkBtn.style.cssText = 'position:absolute;bottom:12px;left:12px;padding:6px 10px;font:13px system-ui;' +
@@ -398,9 +408,15 @@ let hintTimer = 0;
 
 function walkHint(text = null, seconds = 0) {
   clearTimeout(hintTimer);
-  walkBtn.textContent = text ?? (walk.seated
-    ? `Sitting: ${walk.seated.userData.seat}  ·  mouse: look  ·  C or WASD: stand up  ·  Esc: stop`
-    : WALK_HINT);
+  if (TOUCH) {
+    touchHint.textContent = text ?? (walk.seated ? `Sitting: ${walk.seated.userData.seat}` : '');
+    touchHint.style.display = touchHint.textContent ? '' : 'none';
+    sitBtn.textContent = walk.seated ? 'Stand' : 'Sit';
+  } else {
+    walkBtn.textContent = text ?? (walk.seated
+      ? `Sitting: ${walk.seated.userData.seat}  ·  mouse: look  ·  C or WASD: stand up  ·  Esc: stop`
+      : WALK_HINT);
+  }
   if (seconds) hintTimer = setTimeout(() => walk.active && walkHint(), seconds * 1000);
 }
 
@@ -410,7 +426,14 @@ function startWalk() {
   walk.orbitCam = { pos: camera.position.clone(), quat: camera.quaternion.clone() };
   controls.enabled = false;
   camera.rotation.order = 'YXZ';
-  walkHint();
+  if (TOUCH) {
+    touchUi.style.display = '';
+    walkBtn.style.display = 'none';
+    vrButton.style.visibility = status.style.visibility = 'hidden';  // clear the screen edges
+    walkHint(TOUCH_HINT, 5);
+  } else {
+    walkHint();
+  }
 }
 
 function sit() {
@@ -447,11 +470,20 @@ function stopWalk() {
   camera.position.copy(walk.orbitCam.pos);
   camera.quaternion.copy(walk.orbitCam.quat);
   controls.enabled = true;
-  walkBtn.textContent = 'Walk (F)';
+  walkBtn.textContent = TOUCH ? 'Walk' : 'Walk (F)';
+  if (TOUCH) {
+    touchUi.style.display = 'none';
+    walkBtn.style.display = '';
+    vrButton.style.visibility = status.style.visibility = '';
+    releaseStick();
+    lookTouch = null;
+  }
 }
 
 const requestWalk = () => renderer.domElement.requestPointerLock();
-walkBtn.addEventListener('click', (e) => { if (!walk.active) requestWalk(); e.currentTarget.blur(); });
+// iOS has no pointer lock; touch walk doesn't need it
+walkBtn.addEventListener('click', (e) => { if (!walk.active) (TOUCH ? startWalk : requestWalk)(); e.currentTarget.blur(); });
+if (TOUCH) walkBtn.textContent = 'Walk';
 document.addEventListener('pointerlockchange', () => {
   if (document.pointerLockElement === renderer.domElement) startWalk(); else stopWalk();
 });
@@ -472,6 +504,89 @@ window.addEventListener('keydown', (e) => {
 });
 window.addEventListener('keyup', (e) => walk.keys.delete(e.code));
 window.addEventListener('blur', () => walk.keys.clear());
+
+// ---- touch walk: a touch starting bottom-left is a floating thumbstick (centred where the thumb lands;
+// push farther = faster, up to run speed); any other single-finger drag looks. Sit / Exit buttons bottom-right.
+const touchUi = document.createElement('div');
+touchUi.style.cssText = 'display:none;position:absolute;inset:0;pointer-events:none;user-select:none;' +
+  '-webkit-user-select:none';
+document.body.appendChild(touchUi);
+const STICK_HOME = { left: 36, bottom: 36 };  // px from the corner to the ring's edge when idle
+const stickBase = document.createElement('div');
+stickBase.style.cssText = `position:absolute;left:${STICK_HOME.left}px;bottom:${STICK_HOME.bottom}px;` +
+  `width:${2 * STICK_R}px;height:${2 * STICK_R}px;border-radius:50%;background:rgba(0,0,0,.25);` +
+  'border:2px solid rgba(255,255,255,.6);box-sizing:border-box';
+const stickKnob = document.createElement('div');
+stickKnob.style.cssText = `position:absolute;left:${STICK_R - 26}px;top:${STICK_R - 26}px;width:52px;height:52px;` +
+  'border-radius:50%;background:rgba(255,255,255,.75)';
+stickBase.appendChild(stickKnob);
+const touchHint = document.createElement('div');
+touchHint.style.cssText = 'position:absolute;top:30%;left:50%;transform:translateX(-50%);padding:6px 10px;max-width:85vw;' +
+  'font:13px system-ui;border-radius:6px;background:rgba(0,0,0,.55);color:#fff;text-align:center';
+const touchBtns = document.createElement('div');
+touchBtns.style.cssText = 'position:absolute;right:16px;bottom:16px;display:flex;gap:10px;pointer-events:auto';
+const touchBtn = (label, onTap) => {
+  const b = document.createElement('button');
+  b.style.cssText = 'padding:12px 18px;font:15px system-ui;border:0;border-radius:8px;' +
+    'background:rgba(0,0,0,.55);color:#fff;touch-action:manipulation';
+  b.textContent = label;
+  b.addEventListener('click', onTap);
+  touchBtns.appendChild(b);
+  return b;
+};
+const sitBtn = touchBtn('Sit', () => (walk.seated ? standUp : sit)());
+touchBtn('Exit', () => stopWalk());
+touchUi.append(stickBase, touchHint, touchBtns);
+
+const thumb = { id: null, x0: 0, y0: 0, x: 0, y: 0 };  // x, y in -1..1 (y down), magnitude <= 1
+let lookTouch = null;                                  // { id, x, y } of the finger that looks
+
+function releaseStick() {
+  thumb.id = null;
+  thumb.x = thumb.y = 0;
+  stickBase.style.left = `${STICK_HOME.left}px`;
+  stickBase.style.top = '';
+  stickBase.style.bottom = `${STICK_HOME.bottom}px`;
+  stickKnob.style.transform = '';
+}
+
+const walkCanvas = renderer.domElement;
+walkCanvas.addEventListener('pointerdown', (e) => {
+  if (!walk.active || !TOUCH) return;
+  if (thumb.id === null && e.clientX < innerWidth * 0.4 && e.clientY > innerHeight * 0.4) {
+    thumb.id = e.pointerId;
+    thumb.x0 = e.clientX;
+    thumb.y0 = e.clientY;
+    stickBase.style.left = `${e.clientX - STICK_R}px`;
+    stickBase.style.top = `${e.clientY - STICK_R}px`;
+    stickBase.style.bottom = '';
+  } else if (lookTouch === null) {
+    lookTouch = { id: e.pointerId, x: e.clientX, y: e.clientY };
+  } else {
+    return;
+  }
+  walkCanvas.setPointerCapture(e.pointerId);  // keep the drag when the finger slides over a button
+});
+walkCanvas.addEventListener('pointermove', (e) => {
+  if (e.pointerId === thumb.id) {
+    const dx = e.clientX - thumb.x0, dy = e.clientY - thumb.y0;
+    const k = Math.min(1, STICK_R / Math.hypot(dx, dy));
+    thumb.x = dx * k / STICK_R;
+    thumb.y = dy * k / STICK_R;
+    stickKnob.style.transform = `translate(${thumb.x * STICK_R}px, ${thumb.y * STICK_R}px)`;
+  } else if (lookTouch && e.pointerId === lookTouch.id) {
+    walk.yaw -= (e.clientX - lookTouch.x) * TOUCH_LOOK_SENS;  // drag right = turn right
+    walk.pitch = THREE.MathUtils.clamp(walk.pitch - (e.clientY - lookTouch.y) * TOUCH_LOOK_SENS, -1.45, 1.45);
+    lookTouch.x = e.clientX;
+    lookTouch.y = e.clientY;
+  }
+});
+const endTouch = (e) => {
+  if (e.pointerId === thumb.id) releaseStick();
+  if (lookTouch && e.pointerId === lookTouch.id) lookTouch = null;
+};
+walkCanvas.addEventListener('pointerup', endTouch);
+walkCanvas.addEventListener('pointercancel', endTouch);
 
 const walkParam = new URLSearchParams(location.search).get('walk');  // ?walk=x,z,yawDeg (three coords)
 if (walkParam !== null) {
@@ -510,9 +625,11 @@ function tryMove(dx, dz) {
 
 function updateWalk(dt) {
   const k = walk.keys;
+  const stickMag = Math.hypot(thumb.x, thumb.y);
+  const stickOn = stickMag > STICK_DEADZONE;
   if (walk.seated) {
-    // a move key, or the layout changing (L) and hiding the seat, stands you up
-    if (WALK_MOVE_KEYS.some((c) => k.has(c)) || !visibleInScene(walk.seated)) {
+    // a move key or the stick, or the layout changing (L) and hiding the seat, stands you up
+    if (WALK_MOVE_KEYS.some((c) => k.has(c)) || stickOn || !visibleInScene(walk.seated)) {
       standUp();
     } else {
       walk.seated.getWorldPosition(camera.position);
@@ -520,11 +637,18 @@ function updateWalk(dt) {
       return;
     }
   }
-  const f = (k.has('KeyW') || k.has('ArrowUp')) - (k.has('KeyS') || k.has('ArrowDown'));
-  const s = (k.has('KeyD') || k.has('ArrowRight')) - (k.has('KeyA') || k.has('ArrowLeft'));
+  let f = (k.has('KeyW') || k.has('ArrowUp')) - (k.has('KeyS') || k.has('ArrowDown'));
+  let s = (k.has('KeyD') || k.has('ArrowRight')) - (k.has('KeyA') || k.has('ArrowLeft'));
+  let speed = WALK_SPEED * (k.has('ShiftLeft') || k.has('ShiftRight') ? 2.5 : 1);
+  if (stickOn) {
+    // squared, for fine control near the centre: walking pace at ~2/3 throw, run speed at full
+    f = -thumb.y;
+    s = thumb.x;
+    speed = WALK_SPEED * 2.5 * stickMag * stickMag;
+  }
   if (f || s) {
     // yaw 0 faces -Z (north); + yaw turns left
-    const step = WALK_SPEED * (k.has('ShiftLeft') || k.has('ShiftRight') ? 2.5 : 1) * dt;
+    const step = speed * dt;
     const sin = Math.sin(walk.yaw), cos = Math.cos(walk.yaw);
     const mx = -sin * f + cos * s, mz = -cos * f - sin * s;
     const n = Math.hypot(mx, mz);
@@ -623,4 +747,5 @@ window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  placeLayoutBtn();
 });
