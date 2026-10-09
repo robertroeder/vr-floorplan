@@ -10,8 +10,9 @@ WebXR walkthrough of a floor plan model, for viewing in the Quest browser (stand
 
 - **VR, hand tracking**: right hand pinch and hold to aim (green ray and ring on the floor), release to
   teleport there. Twist your wrist while aiming to choose which way you'll face on landing (arrow on the
-  ring, 30° steps, twist counts double). Left hand pinch steps to the next variant; left pinch and drag
-  sideways snaps 30° per 10 cm instead (drag right = turn right).
+  ring, 30° steps, twist counts double; no twist = keep facing the way you face now). Left hand pinch
+  steps to the next variant; left pinch and drag sideways turns you smoothly in place instead, 30° per 10 cm
+  (drag right = turn right).
 - **VR, controllers**: left stick to move (in the direction you're looking), right stick for 30° snap
   turns, right trigger to aim/teleport, A/X (or left trigger) for the next variant.
 - **Desktop**: drag to orbit, scroll to zoom, `L` or the button for the next variant. URL options:

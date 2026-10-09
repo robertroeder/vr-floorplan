@@ -11,9 +11,12 @@ const MOVE_SPEED = 1.5;                          // m/s
 const SNAP_ANGLE = THREE.MathUtils.degToRad(30);
 const DEADZONE = 0.2;
 const TELEPORT_RANGE = 12;                       // m
-const SWIPE_STEP = 0.10;                         // m of sideways left-pinch drag per snap turn
+const SWIPE_GAIN = THREE.MathUtils.degToRad(30) / 0.10;  // left-pinch drag turn: 30° per 10 cm, continuous
+const SWIPE_DEADZONE = 0.03;                     // m of drag before a pinch counts as a swipe (not a tap)
 const TWIST_GAIN = 2;                            // landing-facing turn per unit of wrist twist while aiming
 const UP = THREE.Object3D.DEFAULT_UP;
+// Head pose in VR: use `camera` (in the rig; three copies the headset pose into it each frame).
+// renderer.xr.getCamera() has no parent, so its getWorldPosition() is relative to the rig, not the world.
 const HINT = [
   'Right pinch: aim, twist wrist to face, release to move',
   'Left pinch: next variant  ·  pinch + swipe sideways: turn',
@@ -94,9 +97,8 @@ function makeToast() {
       lines.forEach((l, i) => ctx.fillText(l, canvas.width / 2, LINE_H * (i + 0.5)));
       tex.needsUpdate = true;
       // 1.2 m in front of the head, slightly below eye level, facing the user
-      const xrCam = renderer.xr.getCamera();
-      xrCam.getWorldPosition(head);
-      xrCam.getWorldDirection(dir);
+      camera.getWorldPosition(head);
+      camera.getWorldDirection(dir);
       dir.y = 0; dir.normalize();
       mesh.position.copy(head).addScaledVector(dir, 1.2).add(new THREE.Vector3(0, -0.15, 0));
       mesh.lookAt(head.x, mesh.position.y, head.z);
@@ -161,11 +163,11 @@ new GLTFLoader().load('./house.glb', (gltf) => {
       o.material = new THREE.MeshBasicMaterial({
         color: 0x9fd0ff, transparent: true, opacity: 0.18, depthWrite: false, side: THREE.DoubleSide,
       });
-      o.renderOrder = 1;
+      o.renderOrder = 1;  // glass (windows, shower) doesn't block the teleport ray
     } else {
       o.material = new THREE.MeshLambertMaterial({ color: src.color, side: THREE.DoubleSide });
+      teleportSurfaces.push(o);  // walls / furniture block the ray; only floor hits are valid targets
     }
-    teleportSurfaces.push(o);  // walls / furniture block the ray; only floor hits are valid targets
   });
   scene.add(gltf.scene);
   initVariants(gltf.scene);
@@ -204,7 +206,7 @@ for (let i = 0; i < 2; i++) {
   ray.add(line);
   rig.add(ray);
 
-  // left select: a quick pinch (or trigger) = next variant; pinch + sideways drag = snap turns instead
+  // left select: a quick pinch (or trigger) = next variant; pinch + sideways drag = smooth turn instead
   const p = { ray, line, hand, handedness: null, aiming: false, target: null, facing: 0,
               twistUp0: null, swiping: false, swiped: false, anchor: new THREE.Vector3() };
   pointers.push(p);
@@ -258,21 +260,25 @@ function wristTwist(p) {
 }
 
 function updateSwipe(p) {
-  // sideways hand travel since the anchor, along the head's right vector (world)
-  const xrCam = renderer.xr.getCamera();
-  xrCam.getWorldDirection(fwd);
+  // sideways hand travel along the head's right vector, in rig-local space (turning the rig doesn't
+  // move the hand there). Past the dead zone, the view turns with the hand: drag right = turn right.
+  camera.getWorldDirection(fwd);
+  fwd.applyQuaternion(tmpQuat.copy(rig.quaternion).invert());
   fwd.y = 0; fwd.normalize();
   right.crossVectors(fwd, UP).normalize();
-  const dx = tmpDir.copy(p.ray.position).sub(p.anchor).applyQuaternion(rig.quaternion).dot(right);
-  if (Math.abs(dx) < SWIPE_STEP) return;
-  snapTurn(-Math.sign(dx) * SNAP_ANGLE);  // swipe right = turn right
-  p.swiped = true;
+  const dx = tmpDir.copy(p.ray.position).sub(p.anchor).dot(right);
+  if (!p.swiped) {
+    if (Math.abs(dx) < SWIPE_DEADZONE) return;
+    p.swiped = true;
+  } else {
+    snapTurn(-dx * SWIPE_GAIN);
+  }
   p.anchor.copy(p.ray.position);
 }
 
 function snapTurn(angle) {
   // rotate the rig around the head so the user turns in place (+angle = turn left)
-  renderer.xr.getCamera().getWorldPosition(headPos);
+  camera.getWorldPosition(headPos);
   rig.position.sub(headPos).applyAxisAngle(UP, angle).add(headPos);
   rig.rotation.y += angle;
 }
@@ -329,7 +335,7 @@ function updateAim(p) {
   // landing facing: current head yaw plus the wrist twist, in snap-angle steps
   const twist = TWIST_GAIN * wristTwist(p);
   p.facing = THREE.MathUtils.clamp(Math.round(twist / SNAP_ANGLE) * SNAP_ANGLE, -Math.PI, Math.PI);
-  renderer.xr.getCamera().getWorldDirection(fwd);
+  camera.getWorldDirection(fwd);
   marker.rotation.y = Math.atan2(-fwd.x, -fwd.z) + p.facing;
 }
 
@@ -337,7 +343,7 @@ const headPos = new THREE.Vector3();
 function teleportTo(point, facing = 0) {
   // move the rig so the user's head ends up above the target point, standing on it (stairs, yard),
   // then turn it about that point by `facing` (+ = left)
-  renderer.xr.getCamera().getWorldPosition(headPos);
+  camera.getWorldPosition(headPos);
   rig.position.x += point.x - headPos.x;
   rig.position.z += point.z - headPos.z;
   rig.position.y = point.y;
@@ -385,7 +391,6 @@ function stick(gp) {
 function locomote(dt) {
   const session = renderer.xr.getSession();
   if (!session) return;
-  const xrCam = renderer.xr.getCamera();
   for (const src of session.inputSources) {
     if (!src.gamepad || src.hand) continue;
     const pressed = !!src.gamepad.buttons[4]?.pressed;
@@ -393,7 +398,7 @@ function locomote(dt) {
     buttonWasDown[src.handedness] = pressed;
     const { x, y } = stick(src.gamepad);
     if (src.handedness === 'left' && (x || y)) {
-      xrCam.getWorldDirection(fwd);
+      camera.getWorldDirection(fwd);
       fwd.y = 0; fwd.normalize();
       right.crossVectors(fwd, UP).normalize();
       rig.position.addScaledVector(fwd, -y * MOVE_SPEED * dt);
