@@ -25,6 +25,8 @@ const HINT = [
 const status = document.getElementById('status');
 // phones / tablets: walk mode uses an on-screen thumbstick and drag-to-look (?touch forces it, for testing)
 const TOUCH = matchMedia('(pointer: coarse)').matches || new URLSearchParams(location.search).has('touch');
+// iOS Safari ignores user-scalable=no; touch-action (index.html) stops double-tap zoom, this stops pinch zoom
+document.addEventListener('gesturestart', (e) => e.preventDefault());
 
 // ---- renderer / scene ----
 const renderer = new THREE.WebGLRenderer({ antialias: true });

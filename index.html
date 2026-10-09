@@ -2,10 +2,12 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
   <title>VR Floorplan</title>
   <style>
     html, body { margin: 0; height: 100%; overflow: hidden; background: #b8d4e8; font-family: system-ui, sans-serif; }
+    /* no page zoom on phones (double-tap or pinch); the canvas handles its own gestures, and taps still click */
+    html, body { touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
     #status { position: absolute; top: 12px; left: 12px; padding: 6px 10px; background: rgba(0,0,0,.55);
               color: #fff; border-radius: 6px; font-size: 13px; }
   </style>
