@@ -362,24 +362,43 @@ function updateAim(p) {
   tmpDir.set(0, 0, -1).applyQuaternion(tmpQuat);
   raycaster.set(tmpPos, tmpDir);
   const hit = raycaster.intersectObjects(teleportSurfaces, false).find((h) => visibleInScene(h.object));
-  let valid = false;
+  let target = null;
   if (hit) {
     tmpNormal.copy(hit.face.normal).transformDirection(hit.object.matrixWorld);
-    valid = tmpNormal.y > 0.7 && hit.point.y < 0.15;  // floors, decks, stairs, ground; not furniture tops
+    if (tmpNormal.y > 0.7) target = hit.point;  // floors, decks, stairs, ground
+    else if (Math.abs(tmpNormal.y) < 0.3) target = stepTopBehind(hit.point, tmpNormal);  // a riser: land on its tread
+    if (target && target.y >= 0.15) target = null;  // not furniture tops
   }
+  const valid = target !== null;
   const len = hit ? hit.distance : TELEPORT_RANGE;
   p.line.scale.z = len;
   p.line.material.color.set(valid ? 0x66ff99 : 0xff6666);
   p.line.visible = true;
-  p.target = valid ? hit.point.clone() : null;
+  p.target = valid ? target.clone() : null;
   marker.visible = valid;
   if (!valid) return;
-  marker.position.copy(hit.point).setY(hit.point.y + 0.01);
+  marker.position.copy(target).setY(target.y + 0.01);
   // landing facing: current head yaw plus the wrist twist, in snap-angle steps
   const twist = TWIST_GAIN * wristTwist(p);
   p.facing = THREE.MathUtils.clamp(Math.round(twist / SNAP_ANGLE) * SNAP_ANGLE, -Math.PI, Math.PI);
   camera.getWorldDirection(fwd);
   marker.rotation.y = Math.atan2(-fwd.x, -fwd.z) + p.facing;
+}
+
+// Aiming at the front of a step (stairs, the floor edge at the stairwell) lands on top of it, so you don't
+// have to hit the thin tread from below. Probe a little way in behind the vertical face and look down from
+// a step above the hit: an upward surface up to STEP_UP higher is the step's top. Walls have nothing there.
+const stepProbe = new THREE.Vector3();
+const stepNormal = new THREE.Vector3();
+function stepTopBehind(point, normal) {
+  stepNormal.set(normal.x, 0, normal.z).normalize();
+  if (stepNormal.dot(tmpDir) > 0) stepNormal.negate();  // double-sided: make it face the user
+  stepProbe.copy(point).addScaledVector(stepNormal, -0.1);
+  stepProbe.y += STEP_UP;
+  const top = firstVisibleHit(stepProbe, DOWN, STEP_UP);
+  if (!top || top.point.y <= point.y) return null;
+  stepNormal.copy(top.face.normal).transformDirection(top.object.matrixWorld);
+  return stepNormal.y > 0.7 ? top.point : null;
 }
 
 const headPos = new THREE.Vector3();
