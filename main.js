@@ -117,22 +117,39 @@ function makeToast() {
   };
 }
 
-// ---- variants (left pinch / X / A in VR, L key or button on desktop) ----
+// ---- variants (left pinch / X / A in VR, L key or "Next all" on desktop; the options panel sets each group) ----
 // Every node with a "group" extra is one option of that group (living layout, shower bench, ...).
-// One step counter drives all groups; each shows option (step mod its option count).
-const layoutBtn = document.createElement('button');
-layoutBtn.style.cssText = 'position:absolute;top:12px;right:12px;padding:6px 10px;font:13px system-ui;' +
-  'border:0;border-radius:6px;background:rgba(0,0,0,.55);color:#fff;cursor:pointer;display:none;' +
-  'max-width:min(70vw, 900px);text-align:right';
-document.body.appendChild(layoutBtn);
+// Each group has its own current option; "next" moves every group forward one from where it is.
+// Tab opens / closes the panel (in walk mode it also frees the mouse for it; see walk mode).
+const panelBtnCss = 'padding:4px 8px;font:13px system-ui;border:0;border-radius:5px;' +
+  'background:rgba(255,255,255,.18);color:#fff;cursor:pointer;touch-action:manipulation';
+const panel = document.createElement('div');
+panel.style.cssText = 'position:absolute;top:12px;right:12px;padding:6px 8px;font:13px system-ui;color:#fff;' +
+  'border-radius:6px;background:rgba(0,0,0,.55);display:none;max-width:min(92vw, 480px)';
+const panelHead = document.createElement('div');
+panelHead.style.cssText = 'display:flex;gap:6px;justify-content:flex-end';
+const panelToggle = document.createElement('button');
+const nextBtn = document.createElement('button');
+panelToggle.style.cssText = nextBtn.style.cssText = panelBtnCss;
+nextBtn.textContent = TOUCH ? 'Next all' : 'Next all (L)';
+const panelBody = document.createElement('div');
+panelBody.style.cssText = 'display:grid;grid-template-columns:auto minmax(0, 1fr);gap:4px 8px;align-items:center;' +
+  'margin-top:6px';
+panelHead.append(panelToggle, nextBtn);
+panel.append(panelHead, panelBody);
+document.body.appendChild(panel);
 // phones in portrait: below the status line instead of overlapping it
-const placeLayoutBtn = () => { layoutBtn.style.top = window.innerWidth < 600 ? '48px' : '12px'; };
-placeLayoutBtn();
-let groups = [];  // [{ name, options: [node, ...] }]
-let period = 1;   // steps until every group is back at its first option
-let step = 0;
+const placePanel = () => { panel.style.top = window.innerWidth < 600 ? '48px' : '12px'; };
+placePanel();
+let groups = [];  // [{ name, options: [node, ...], current, select }]
+let panelOpen = !TOUCH;
 
-const gcd = (a, b) => (b ? gcd(b, a % b) : a);
+function setPanelOpen(open) {
+  panelOpen = open;
+  panelBody.style.display = open ? 'grid' : 'none';
+  panelToggle.textContent = `Options ${open ? '▴' : '▾'}${TOUCH ? '' : ' (Tab)'}`;
+}
+setPanelOpen(panelOpen);
 
 function initVariants(root) {
   const byName = new Map();
@@ -143,24 +160,50 @@ function initVariants(root) {
     byName.get(g).push(o);
   });
   groups = [...byName].sort(([a], [b]) => a.localeCompare(b)).map(([name, options]) => ({
-    name, options: options.sort((a, b) => a.userData.index - b.userData.index),
+    name, options: options.sort((a, b) => a.userData.index - b.userData.index), current: 0, select: null,
   }));
-  period = groups.reduce((p, g) => (p * g.options.length) / gcd(p, g.options.length), 1);
+  for (const g of groups) {
+    const label = document.createElement('label');
+    label.textContent = g.name;
+    const select = document.createElement('select');
+    select.style.cssText = 'font:13px system-ui;max-width:100%;min-width:0';
+    g.options.forEach((o, j) => select.add(new Option(o.userData.label ?? String(j), String(j))));
+    select.addEventListener('change', () => {
+      showOption(g, Number(select.value));
+      select.blur();  // so the walk keys (and L) go back to walking instead of changing the dropdown
+    });
+    label.htmlFor = select.id = `opt-${g.name.replace(/\W+/g, '-')}`;
+    g.select = select;
+    panelBody.append(label, select);
+  }
 }
 
-function setStep(n) {
-  if (!groups.length) return;
-  step = ((n % period) + period) % period;
-  const lines = groups.map((g) => {
-    const k = step % g.options.length;
-    g.options.forEach((o, j) => { o.visible = j === k; });
-    return `${g.name}: ${g.options[k].userData.label ?? k}`;
-  });
-  layoutBtn.textContent = `${step + 1}/${period}  ${lines.join('  ·  ')}  (${TOUCH ? 'tap' : 'L'}: next)`;
-  toast.show(lines);
+function showOption(g, k) {
+  g.current = k;
+  g.options.forEach((o, j) => { o.visible = j === k; });
+  g.select.value = String(k);
 }
-layoutBtn.addEventListener('click', () => setStep(step + 1));
-window.addEventListener('keydown', (e) => { if (e.key === 'l' || e.key === 'L') setStep(step + 1); });
+
+function nextAll() {
+  for (const g of groups) showOption(g, (g.current + 1) % g.options.length);
+  toast.show(groups.map((g) => `${g.name}: ${g.options[g.current].userData.label ?? g.current}`));
+}
+
+// ?v=<step>: every group at (step mod its option count), as the old single step counter did
+function setStep(n) {
+  for (const g of groups) showOption(g, ((n % g.options.length) + g.options.length) % g.options.length);
+}
+
+panelToggle.addEventListener('click', (e) => { setPanelOpen(!panelOpen); e.currentTarget.blur(); });
+nextBtn.addEventListener('click', (e) => { nextAll(); e.currentTarget.blur(); });
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'Tab') {  // even from a focused dropdown
+    e.preventDefault();    // no focus cycling
+    document.activeElement?.blur();
+    if (walk.active && !TOUCH) freeMouse(!walk.mouseFree); else setPanelOpen(!panelOpen);
+  }
+  if (e.code === 'KeyL' && e.target.tagName !== 'SELECT') nextAll();
+});
 
 // ---- main floor toggle (desktop orbit view): M key or button hides the main floor to show the basement ----
 // The model's "Main floor" node (level extra) holds its walls, floor, fixtures and furniture; the stair,
@@ -215,7 +258,7 @@ function onModel(gltf) {
   scene.add(gltf.scene);
   initVariants(gltf.scene);
   if (groups.length) {
-    layoutBtn.style.display = '';
+    panel.style.display = '';
     setStep(Number(new URLSearchParams(location.search).get('v')) || 0);  // ?v=<step>
   }
   status.textContent = navigator.xr ? 'Ready: press Enter VR' : 'Ready (no WebXR in this browser)';
@@ -272,7 +315,7 @@ for (let i = 0; i < 2; i++) {
   });
   ray.addEventListener('selectend', () => {
     if (p.aiming && p.target) teleportTo(p.target, p.facing);
-    if (p.swiping && !p.swiped) setStep(step + 1);
+    if (p.swiping && !p.swiped) nextAll();
     p.aiming = false;
     p.swiping = false;
     p.target = null;
@@ -432,7 +475,9 @@ const LOOK_SENS = 0.0022;        // rad per pixel of mouse movement
 const BLOCKERS = [[STEP_UP + 0.05, 0.12], [1.0, BODY_RADIUS], [1.7, 0.12]];
 const SIT_RANGE = 1.5;           // m from your feet to a seat for C to sit you there
 const WALK_MOVE_KEYS = ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
-const WALK_HINT = 'WASD / arrows: move  ·  mouse: look  ·  Shift: run  ·  C: sit  ·  L: next variant  ·  Esc: stop';
+const WALK_HINT = 'WASD / arrows: move  ·  mouse: look  ·  Shift: run  ·  C: sit  ·  L: next variant  ·  ' +
+  'Tab: options  ·  Esc: stop';
+const FREE_HINT = 'Mouse free for the options  ·  WASD: move  ·  Tab or click the view: look again  ·  Esc: stop';
 const TOUCH_HINT = 'Left thumb: move (push farther to run)  ·  drag: look';
 const STICK_R = 60;              // px of thumb travel for full speed (touch)
 const STICK_DEADZONE = 0.15;
@@ -445,8 +490,9 @@ walkBtn.textContent = 'Walk (F)';
 document.body.appendChild(walkBtn);
 
 // seated: the seat node we're on (eye position + "yaw" extra, from layout_living.py); standFeet: where to stand back up
+// mouseFree: pointer lock released for the options panel (Tab), still walking; panelWasOpen: its state in orbit view
 const walk = { active: false, feet: SPAWN.clone(), yaw: 0, pitch: 0, vy: 0, keys: new Set(), orbitCam: null,
-               seated: null, standFeet: new THREE.Vector3() };
+               seated: null, standFeet: new THREE.Vector3(), mouseFree: false, panelWasOpen: false };
 const seats = [];  // nodes with a "seat" extra (sofa, chaise, dining chairs), filled when the model loads
 const walkRay = new THREE.Raycaster();
 const walkDir = new THREE.Vector3();
@@ -461,8 +507,8 @@ function walkHint(text = null, seconds = 0) {
     touchHint.style.display = touchHint.textContent ? '' : 'none';
     sitBtn.textContent = walk.seated ? 'Stand' : 'Sit';
   } else {
-    walkBtn.textContent = text ?? (walk.seated
-      ? `Sitting: ${walk.seated.userData.seat}  ·  mouse: look  ·  C or WASD: stand up  ·  Esc: stop`
+    walkBtn.textContent = text ?? (walk.mouseFree ? FREE_HINT : walk.seated
+      ? `Sitting: ${walk.seated.userData.seat}  ·  mouse: look  ·  C or WASD: stand up  ·  Tab: options  ·  Esc: stop`
       : WALK_HINT);
   }
   if (seconds) hintTimer = setTimeout(() => walk.active && walkHint(), seconds * 1000);
@@ -476,6 +522,8 @@ function startWalk() {
   camera.rotation.order = 'YXZ';
   showMainFloor(true);  // you'd fall through it
   floorBtn.style.visibility = 'hidden';
+  walk.panelWasOpen = panelOpen;
+  setPanelOpen(false);  // keep the view clear; Tab (or a tap on Options) opens it
   if (TOUCH) {
     touchUi.style.display = '';
     walkBtn.style.display = 'none';
@@ -514,8 +562,10 @@ function stopWalk() {
   if (!walk.active) return;
   standUp();
   walk.active = false;
+  walk.mouseFree = false;
   walk.keys.clear();
   clearTimeout(hintTimer);
+  setPanelOpen(walk.panelWasOpen);
   camera.rotation.order = 'XYZ';
   camera.position.copy(walk.orbitCam.pos);
   camera.quaternion.copy(walk.orbitCam.quat);
@@ -531,23 +581,51 @@ function stopWalk() {
   }
 }
 
-const requestWalk = () => renderer.domElement.requestPointerLock();
+// Chrome rejects a lock requested too soon after leaving one (a promise); clicking the view retries
+const requestWalk = () => renderer.domElement.requestPointerLock()?.catch?.(() => {});
 // iOS has no pointer lock; touch walk doesn't need it
 walkBtn.addEventListener('click', (e) => { if (!walk.active) (TOUCH ? startWalk : requestWalk)(); e.currentTarget.blur(); });
 if (TOUCH) walkBtn.textContent = 'Walk';
 document.addEventListener('pointerlockchange', () => {
-  if (document.pointerLockElement === renderer.domElement) startWalk(); else stopWalk();
+  if (document.pointerLockElement === renderer.domElement) {
+    if (!walk.active) startWalk();
+    else if (walk.mouseFree) { walk.mouseFree = false; setPanelOpen(false); walkHint(); }
+  } else if (!walk.mouseFree) {
+    stopWalk();  // Esc (the browser releases the lock itself)
+  }
 });
+
+// Tab in walk mode: release the mouse for the options panel (still walking), or take it back for looking
+function freeMouse(free) {
+  if (free === walk.mouseFree) return;
+  if (free) {
+    walk.mouseFree = true;
+    setPanelOpen(true);
+    document.exitPointerLock();
+    walkHint();
+  } else {
+    document.activeElement?.blur();
+    requestWalk();  // pointerlockchange finishes it (closes the panel)
+    if (walkParam !== null && !document.pointerLockElement) {  // ?walk (headless) runs without a lock
+      walk.mouseFree = false;
+      setPanelOpen(false);
+      walkHint();
+    }
+  }
+}
+renderer.domElement.addEventListener('click', () => { if (walk.active && walk.mouseFree && !TOUCH) freeMouse(false); });
 document.addEventListener('mousemove', (e) => {
   if (!walk.active || document.pointerLockElement !== renderer.domElement) return;
   walk.yaw -= e.movementX * LOOK_SENS;
   walk.pitch = THREE.MathUtils.clamp(walk.pitch - e.movementY * LOOK_SENS, -1.45, 1.45);
 });
 window.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'SELECT') return;  // a focused dropdown takes letters and arrows
   if (!walk.active) {
     if (e.code === 'KeyF') requestWalk();
     return;
   }
+  if (e.code === 'Tab') return;  // the options panel's handler
   if (e.code === 'Escape') { document.exitPointerLock(); stopWalk(); return; }  // ?walk has no lock to release
   if (e.code === 'KeyC') { if (!e.repeat) (walk.seated ? standUp : sit)(); return; }
   walk.keys.add(e.code);
@@ -802,5 +880,5 @@ window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
-  placeLayoutBtn();
+  placePanel();
 });
