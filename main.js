@@ -206,7 +206,9 @@ function onModel(gltf) {
       });
       o.renderOrder = 1;  // glass (windows, shower) doesn't block the teleport ray
     } else {
-      o.material = new THREE.MeshLambertMaterial({ color: src.color, side: THREE.DoubleSide });
+      // floors (hardwood, carpet, tile) keep their texture; anisotropy keeps it sharp at grazing angles
+      if (src.map) src.map.anisotropy = Math.min(4, renderer.capabilities.getMaxAnisotropy());
+      o.material = new THREE.MeshLambertMaterial({ color: src.color, map: src.map, side: THREE.DoubleSide });
       teleportSurfaces.push(o);  // walls / furniture block the ray; only floor hits are valid targets
     }
   });
